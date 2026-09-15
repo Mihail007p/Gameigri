@@ -1,0 +1,20 @@
+name: tests
+
+# Живая проверка прямо на GitHub: при каждом push и pull request запускаются
+# автотесты игровой логики. Если они упали — в репозитории сразу видно крестик.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  game-logic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Автотесты игровой логики и баланса
+        run: node tools/test_game.js
