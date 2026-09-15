@@ -1,11 +1,551 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Gameigri</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Gameigri — гонки</title>
+<style>
+  :root {
+    --bg: #0b0f17;
+    --accent: #35d0ff;
+    --accent2: #ffd166;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; background: var(--bg); color: #e9f1ff;
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden;
+  }
+  #app {
+    position: relative; margin: 0 auto; height: 100%;
+    width: min(100vw, calc(100vh * 480 / 720));
+    display: flex; align-items: center; justify-content: center;
+  }
+  canvas {
+    display: block; width: 100%; height: 100%;
+    background: #10141d; touch-action: none;
+  }
+  /* ---------- Оверлеи (меню / пауза / конец) ---------- */
+  .screen {
+    position: absolute; inset: 0; display: none;
+    flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; padding: 24px; text-align: center;
+    background: radial-gradient(circle at 50% 35%, rgba(53,208,255,.12), rgba(6,9,15,.92) 65%);
+    backdrop-filter: blur(2px);
+  }
+  .screen.on { display: flex; }
+  .title {
+    font-size: clamp(28px, 7vw, 46px); font-weight: 800; letter-spacing: .04em;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .sub { opacity: .75; font-size: clamp(12px, 3vw, 15px); line-height: 1.6; }
+  .keys { display: grid; grid-template-columns: auto auto; gap: 6px 14px; opacity: .8; font-size: 13px; }
+  .keys b { color: var(--accent); font-weight: 600; }
+  button {
+    font: inherit; font-weight: 600; cursor: pointer; color: #06121a;
+    background: linear-gradient(180deg, #7fe4ff, #35d0ff);
+    border: 0; border-radius: 12px; padding: 13px 30px;
+    box-shadow: 0 8px 22px rgba(53,208,255,.28);
+  }
+  button:active { transform: translateY(1px); }
+  .stat { font-size: 15px; }
+  .stat b { color: var(--accent2); font-size: 22px; }
+  /* ---------- Кнопки для тача ---------- */
+  #touch {
+    position: absolute; inset: auto 0 0 0; height: 32%;
+    display: none; justify-content: space-between; padding: 0 14px 14px;
+    pointer-events: none;
+  }
+  #touch .grp { display: flex; gap: 12px; align-items: flex-end; pointer-events: auto; }
+  #touch button {
+    width: 74px; height: 74px; border-radius: 50%; padding: 0; font-size: 24px;
+    background: rgba(233,241,255,.14); color: #e9f1ff; box-shadow: none;
+    border: 1px solid rgba(233,241,255,.25); backdrop-filter: blur(4px);
+  }
+  #touch button:active { background: rgba(53,208,255,.35); }
+  body.touch #touch { display: flex; }
+  .hint { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+          font-size: 11px; opacity: .45; pointer-events: none; white-space: nowrap; }
+</style>
 </head>
 <body>
-  <h1>Gameigri</h1>
+<div id="app">
+  <canvas id="game" width="480" height="720"></canvas>
+
+  <!-- Меню -->
+  <div class="screen on" id="scrMenu">
+    <div class="title">Gameigri • Гонки</div>
+    <div class="sub">Каркас аркадных гонок<br>Уворачивайтесь от трафика и держите скорость</div>
+    <div class="keys">
+      <b>← →</b><span>руль</span>
+      <b>↑ ↓</b><span>газ / тормоз</span>
+      <b>P</b><span>пауза</span>
+    </div>
+    <button id="btnStart">Поехали 🏁</button>
+  </div>
+
+  <!-- Пауза -->
+  <div class="screen" id="scrPause">
+    <div class="title">Пауза</div>
+    <button id="btnResume">Продолжить</button>
+  </div>
+
+  <!-- Конец заезда -->
+  <div class="screen" id="scrOver">
+    <div class="title">Авария!</div>
+    <div class="stat">Дистанция: <b id="resScore">0</b> м</div>
+    <div class="stat" style="opacity:.7">Рекорд: <span id="resBest">0</span> м</div>
+    <button id="btnRetry">Ещё раз ↺</button>
+  </div>
+
+  <!-- Тач-управление -->
+  <div id="touch">
+    <div class="grp"><button data-k="left">◀</button><button data-k="right">▶</button></div>
+    <div class="grp"><button data-k="brake">▼</button><button data-k="gas">▲</button></div>
+  </div>
+  <div class="hint" id="hint">кликните по полю и используйте стрелки</div>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+/* =====================================================================
+   1. КОНФИГ — все настройки баланса в одном месте
+   ===================================================================== */
+const CFG = {
+  W: 480, H: 720,            // внутреннее разрешение холста (CSS масштабирует)
+  shoulder: 64,              // ширина обочины слева/справа
+  lanes: 3,                  // число полос
+  carW: 46, carH: 84,        // размер машины (всех)
+  playerY: 556,              // где по вертикали стоит игрок
+
+  // Динамика игрока
+  speedStart: 260,           // стартовая скорость, px/сек
+  speedMax: 820,             // базовая максималка (растёт с дистанцией)
+  gasAccel: 240, brakePower: 480, drag: 130,
+  steer: 400,                // боковая скорость, px/сек
+
+  // Трафик
+  spawnEveryStart: 1.15,     // интервал спавна, сек
+  spawnEveryMin: 0.42,
+  trafficSpeedMin: 130, trafficSpeedMax: 330,
+
+  // Счёт
+  pxPerMeter: 8,             // сколько пикселей дороги = 1 метр
+  bestKey: 'gameigri.best.v1'
+};
+
+/* =====================================================================
+   2. УТИЛИТЫ
+   ===================================================================== */
+const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
+const rand = (a, b) => a + Math.random() * (b - a);
+const pick = arr => arr[(Math.random() * arr.length) | 0];
+
+// localStorage в sandbox-iframe может быть недоступен — не падаем
+const Store = {
+  get(k, def) { try { const v = localStorage.getItem(k); return v === null ? def : JSON.parse(v); } catch { return def; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+};
+
+/* =====================================================================
+   3. ВВОД — клавиатура + тач/мышь
+   ===================================================================== */
+const Input = {
+  left: false, right: false, gas: false, brake: false,
+  init() {
+    const map = {
+      ArrowLeft: 'left', a: 'left', A: 'left',
+      ArrowRight: 'right', d: 'right', D: 'right',
+      ArrowUp: 'gas', w: 'gas', W: 'gas',
+      ArrowDown: 'brake', s: 'brake', S: 'brake'
+    };
+    addEventListener('keydown', e => {
+      const k = map[e.key];
+      if (k) { this[k] = true; e.preventDefault(); }
+      if (e.key === 'p' || e.key === 'P' || e.key === 'Escape') Game.togglePause();
+      if (e.key === 'Enter') Game.enterPressed();
+    });
+    addEventListener('keyup', e => {
+      const k = map[e.key];
+      if (k) { this[k] = false; e.preventDefault(); }
+    });
+
+    // тач-кнопки
+    document.querySelectorAll('#touch button').forEach(b => {
+      const k = b.dataset.k;
+      const on = e => { this[k] = true; e.preventDefault(); };
+      const off = e => { this[k] = false; e.preventDefault(); };
+      b.addEventListener('pointerdown', on);
+      b.addEventListener('pointerup', off);
+      b.addEventListener('pointercancel', off);
+      b.addEventListener('pointerleave', off);
+    });
+
+    // показываем тач-кнопки на сенсорных устройствах
+    if (matchMedia('(pointer: coarse)').matches) document.body.classList.add('touch');
+    addEventListener('blur', () => { this.left = this.right = this.gas = this.brake = false; });
+  }
+};
+
+/* =====================================================================
+   4. ДОРОГА — фон, обочины, разметка (движется вместе со скоростью мира)
+   ===================================================================== */
+const Road = {
+  offset: 0,          // накопленное смещение разметки
+  left()  { return CFG.shoulder; },
+  right() { return CFG.W - CFG.shoulder; },
+  width() { return this.right() - this.left(); },
+  laneW() { return this.width() / CFG.lanes; },
+  laneCenter(i) { return this.left() + this.laneW() * (i + 0.5); },
+
+  update(dt, worldSpeed) { this.offset = (this.offset + worldSpeed * dt) % 120; },
+
+  draw(ctx) {
+    // обочина — «трава» с полосами скорости
+    const g = ctx.createLinearGradient(0, 0, 0, CFG.H);
+    g.addColorStop(0, '#131b27'); g.addColorStop(1, '#0a0e15');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, CFG.W, CFG.H);
+
+    ctx.fillStyle = 'rgba(53,208,255,.05)';
+    for (let y = -120 + this.offset; y < CFG.H; y += 120) ctx.fillRect(0, y, CFG.shoulder, 60);
+
+    // дорога
+    ctx.fillStyle = '#1b2130';
+    ctx.fillRect(this.left(), 0, this.width(), CFG.H);
+    ctx.strokeStyle = 'rgba(255,255,255,.18)'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(this.left() + 1.5, 0); ctx.lineTo(this.left() + 1.5, CFG.H);
+    ctx.moveTo(this.right() - 1.5, 0); ctx.lineTo(this.right() - 1.5, CFG.H); ctx.stroke();
+
+    // прерывистая разметка между полосами
+    ctx.strokeStyle = 'rgba(233,241,255,.5)'; ctx.lineWidth = 4;
+    ctx.setLineDash([44, 76]);
+    ctx.lineDashOffset = this.offset;
+    ctx.beginPath();
+    for (let i = 1; i < CFG.lanes; i++) {
+      const x = this.left() + this.laneW() * i;
+      ctx.moveTo(x, -60); ctx.lineTo(x, CFG.H + 60);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+};
+
+/* =====================================================================
+   5. МАШИНЫ
+   ===================================================================== */
+class Car {
+  constructor(x, y, color) {
+    this.x = x; this.y = y;            // центр
+    this.w = CFG.carW; this.h = CFG.carH;
+    this.color = color;
+    this.speed = 0;                    // собственная скорость, px/сек
+  }
+  get left()   { return this.x - this.w / 2; }
+  get right()  { return this.x + this.w / 2; }
+  get top()    { return this.y - this.h / 2; }
+  get bottom() { return this.y + this.h / 2; }
+
+  // AABB-столкновение с небольшим «прощением» по краям
+  hits(o, pad = 4) {
+    return this.left + pad < o.right - pad && this.right - pad > o.left + pad &&
+           this.top + pad < o.bottom - pad && this.bottom - pad > o.top + pad;
+  }
+
+  draw(ctx) {
+    const { x, y, w, h } = this;
+    ctx.save();
+    ctx.translate(x, y);
+
+    // тень
+    ctx.fillStyle = 'rgba(0,0,0,.35)';
+    ctx.beginPath(); ctx.roundRect(-w / 2 + 3, -h / 2 + 5, w, h, 10); ctx.fill();
+
+    // кузов
+    const g = ctx.createLinearGradient(-w / 2, 0, w / 2, 0);
+    g.addColorStop(0, this.color); g.addColorStop(.5, '#ffffff22'); g.addColorStop(1, this.color);
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.roundRect(-w / 2, -h / 2, w, h, 10); ctx.fill();
+
+    // кабина / стёкла
+    ctx.fillStyle = 'rgba(10,20,35,.85)';
+    ctx.beginPath(); ctx.roundRect(-w / 2 + 6, -h / 2 + 12, w - 12, h * 0.28, 5); ctx.fill();  // лобовое
+    ctx.beginPath(); ctx.roundRect(-w / 2 + 6,  h / 2 - 26, w - 12, h * 0.18, 5); ctx.fill();  // заднее
+
+    // фары
+    ctx.fillStyle = 'rgba(255,240,190,.9)';
+    ctx.fillRect(-w / 2 + 5, -h / 2 + 2, 10, 4);
+    ctx.fillRect( w / 2 - 15, -h / 2 + 2, 10, 4);
+    ctx.restore();
+  }
+}
+
+class PlayerCar extends Car {
+  constructor() {
+    super(Road.laneCenter(1), CFG.playerY, '#35d0ff');
+    this.speed = CFG.speedStart;
+  }
+  reset() {
+    this.x = Road.laneCenter(1); this.speed = CFG.speedStart;
+  }
+  update(dt, maxSpeed) {
+    // руль
+    let dir = 0;
+    if (Input.left) dir -= 1;
+    if (Input.right) dir += 1;
+    this.x += dir * CFG.steer * dt;
+    this.x = clamp(this.x, Road.left() + this.w / 2, Road.right() - this.w / 2);
+
+    // газ / тормоз / сопротивление
+    if (Input.gas) this.speed += CFG.gasAccel * dt;
+    else if (Input.brake) this.speed -= CFG.brakePower * dt;
+    else this.speed -= CFG.drag * dt;
+    this.speed = clamp(this.speed, 90, maxSpeed);
+
+    // лёгкий крен корпуса при повороте — визуальный отклик
+    this.tilt = (this.tilt || 0) * 0.85 + dir * 0.06;
+  }
+  draw(ctx) {
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.tilt || 0);
+    ctx.translate(-this.x, -this.y);
+    super.draw(ctx);
+    ctx.restore();
+  }
+}
+
+class TrafficCar extends Car {
+  constructor(lane) {
+    super(Road.laneCenter(lane), -CFG.carH, pick(['#ff6b6b', '#ffd166', '#8ac926', '#c084fc', '#f97316', '#e2e8f0']));
+    this.lane = lane;
+    this.speed = rand(CFG.trafficSpeedMin, CFG.trafficSpeedMax);
+    this.color2 = '#00000022';
+  }
+  update(dt, worldSpeed) { this.y += (worldSpeed - this.speed) * dt; }
+  // Машина уходит с экрана вниз (обогнали её) ИЛИ вверх (она быстрее игрока) — в обоих
+  // случаях удаляем, иначе объекты копятся за кадром и память течёт.
+  get offscreen() { return this.y - this.h / 2 > CFG.H + 20 || this.y + this.h / 2 < -CFG.H * 0.5; }
+}
+
+/* =====================================================================
+   6. СПАВНЕР — не даёт запечатать все полосы сразу (иначе смерть без выхода)
+   ===================================================================== */
+const Spawner = {
+  timer: 0,
+  reset() { this.timer = 0.6; },
+  update(dt, cars, progress) {
+    this.timer -= dt;
+    if (this.timer > 0) return;
+    const t = clamp(progress, 0, 1);
+    this.timer = CFG.spawnEveryStart + (CFG.spawnEveryMin - CFG.spawnEveryStart) * t;
+
+    const free = [];
+    for (let i = 0; i < CFG.lanes; i++) free.push(i);
+    // не спавним в полосу, где наверху уже кто-то есть
+    const lanes = free.filter(i => !cars.some(c => c.lane === i && c.y < CFG.carH * 2.4));
+    if (!lanes.length) return;
+
+    let count = Math.random() < (0.15 + 0.45 * t) ? 2 : 1;
+    count = Math.min(count, lanes.length - 1);   // минимум одна полоса всегда свободна
+    for (let n = 0; n < count; n++) {
+      const idx = (Math.random() * lanes.length) | 0;
+      cars.push(new TrafficCar(lanes[idx]));
+      lanes.splice(idx, 1);
+    }
+  }
+};
+
+/* =====================================================================
+   7. HUD
+   ===================================================================== */
+const HUD = {
+  draw(ctx, game) {
+    ctx.save();
+    ctx.font = '700 26px system-ui, sans-serif';
+    ctx.fillStyle = '#e9f1ff';
+    ctx.textAlign = 'left';
+    ctx.fillText(`${game.meters} м`, 18, 40);
+
+    ctx.font = '600 14px system-ui, sans-serif';
+    ctx.fillStyle = 'rgba(233,241,255,.55)';
+    ctx.fillText(`рекорд ${game.best} м`, 18, 62);
+
+    // спидометр
+    const kmh = Math.round(game.player.speed / 3);
+    ctx.textAlign = 'right';
+    ctx.font = '800 30px system-ui, sans-serif';
+    ctx.fillStyle = game.player.speed > (CFG.speedMax * 0.85) ? '#ffd166' : '#35d0ff';
+    ctx.fillText(`${kmh}`, CFG.W - 58, 42);
+    ctx.font = '600 13px system-ui, sans-serif';
+    ctx.fillStyle = 'rgba(233,241,255,.5)';
+    ctx.fillText('км/ч', CFG.W - 18, 42);
+
+    // полоса скорости
+    const p = (game.player.speed - 90) / (game.maxSpeed() - 90);
+    const barW = 120;
+    ctx.fillStyle = 'rgba(233,241,255,.15)';
+    ctx.fillRect(CFG.W - barW - 18, 54, barW, 6);
+    ctx.fillStyle = '#35d0ff';
+    ctx.fillRect(CFG.W - barW - 18, 54, barW * clamp(p, 0, 1), 6);
+    ctx.restore();
+  }
+};
+
+/* =====================================================================
+   8. ИГРА — состояния, главный цикл
+   ===================================================================== */
+const Game = {
+  state: 'menu',                    // menu | play | pause | over
+  cars: [], player: null, meters: 0, best: 0,
+  distance: 0, last: 0, canvas: null, ctx: null,
+
+  init() {
+    this.canvas = document.getElementById('game');
+    this.ctx = this.canvas.getContext('2d');
+    this.player = new PlayerCar();
+    this.best = Store.get(CFG.bestKey, 0);
+
+    // полифилл для roundRect (Safari < 16)
+    if (!CanvasRenderingContext2D.prototype.roundRect) {
+      CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, r) {
+        r = Math.min(r, w / 2, h / 2);
+        this.moveTo(x + r, y);
+        this.arcTo(x + w, y, x + w, y + h, r);
+        this.arcTo(x + w, y + h, x, y + h, r);
+        this.arcTo(x, y + h, x, y, r);
+        this.arcTo(x, y, x + w, y, r);
+        this.closePath(); return this;
+      };
+    }
+    Input.init();
+    document.getElementById('btnStart').onclick  = () => this.start();
+    document.getElementById('btnRetry').onclick  = () => this.start();
+    document.getElementById('btnResume').onclick = () => this.togglePause();
+    this.canvas.addEventListener('pointerdown', () => {
+      if (this.state === 'menu') this.start();
+      else if (this.state === 'over') this.start();
+    });
+    setTimeout(() => { const h = document.getElementById('hint'); if (h) h.style.display = 'none'; }, 6000);
+
+    this.last = performance.now();
+    requestAnimationFrame(t => this.loop(t));
+  },
+
+  // максимальная скорость растёт вместе с дистанцией — «уровни сложности» из воздуха
+  maxSpeed() { return CFG.speedMax + Math.min(320, this.meters * 0.35); },
+  progress() { return clamp(this.meters / 1200, 0, 1); },
+
+  show(id) {
+    ['scrMenu', 'scrPause', 'scrOver'].forEach(s =>
+      document.getElementById(s).classList.toggle('on', s === id));
+  },
+
+  start() {
+    this.state = 'play';
+    this.cars.length = 0;
+    this.meters = 0; this.distance = 0;
+    Road.offset = 0;
+    Spawner.reset();
+    this.player.reset();
+    this.show(null);
+  },
+
+  togglePause() {
+    if (this.state === 'play') { this.state = 'pause'; this.show('scrPause'); }
+    else if (this.state === 'pause') { this.state = 'play'; this.show(null); }
+  },
+
+  enterPressed() {
+    if (this.state === 'menu' || this.state === 'over') this.start();
+    else if (this.state === 'pause') this.togglePause();
+  },
+
+  gameOver() {
+    this.state = 'over';
+    if (this.meters > this.best) { this.best = this.meters; Store.set(CFG.bestKey, this.best); }
+    document.getElementById('resScore').textContent = this.meters;
+    document.getElementById('resBest').textContent = this.best;
+    this.show('scrOver');
+  },
+
+  update(dt) {
+    if (this.state !== 'play') return;
+
+    const worldSpeed = this.player.speed;
+    Road.update(dt, worldSpeed);
+    this.player.update(dt, this.maxSpeed());
+
+    // дистанция и счёт
+    const px = worldSpeed * dt;
+    this.distance += px;
+    this.meters = Math.floor(this.distance / CFG.pxPerMeter);
+
+    // трафик
+    Spawner.update(dt, this.cars, this.progress());
+    for (const c of this.cars) c.update(dt, worldSpeed);
+    for (let i = this.cars.length - 1; i >= 0; i--) {
+      if (this.cars[i].offscreen) this.cars.splice(i, 1);
+    }
+
+    // столкновения
+    for (const c of this.cars) {
+      if (this.player.hits(c)) { this.gameOver(); break; }
+    }
+  },
+
+  render() {
+    const ctx = this.ctx;
+    Road.draw(ctx);
+    for (const c of this.cars) c.draw(ctx);
+    if (this.state !== 'over') this.player.draw(ctx);
+    HUD.draw(ctx, this);
+
+    // подсказка в меню
+    if (this.state === 'menu' || this.state === 'pause') {
+      ctx.save();
+      ctx.fillStyle = 'rgba(6,9,15,.35)';
+      ctx.fillRect(0, 0, CFG.W, CFG.H);
+      ctx.restore();
+    }
+  },
+
+  loop(now) {
+    // Клэмп шага времени в обе стороны: защита и от «прыжка» после сворачивания вкладки,
+    // и от отрицательного dt при рассинхроне часов (иначе дистанция уходит в минус)
+    const dt = clamp((now - this.last) / 1000, 0, 0.05);
+    this.last = now;
+    this.update(dt);
+    this.render();
+    requestAnimationFrame(t => this.loop(t));
+  }
+};
+
+/* =====================================================================
+   9. СТАРТ
+   ===================================================================== */
+Game.init();
+
+// Отладочный доступ: из консоли браузера можно смотреть/менять состояние игры
+// и использовать его в автотестах: window.Gameigri.Game.cars, .player.speed и т.д.
+window.Gameigri = { Game, CFG, Road, Spawner, Car, PlayerCar, TrafficCar, Input };
+
+/* =====================================================================
+   10. КУДА РАСШИРЯТЬ (заготовки под следующие шаги)
+   ---------------------------------------------------------------------
+   • Спрайты: заменить Car.draw на drawImage(sheet, sx, sy, ...)
+   • Звук: new Audio('motor.mp3').play() + зацикливание, pitch от speed
+   • Нитро: счётчик nitro, множитель скорости, индикатор в HUD
+   • Развилка/уровни: Road.left/right сделать зависящими от distance
+   • Монеты/бонусы: массив items + столкновения как у трафика
+   • Мобильный руль: драг по экрану вместо кнопок (pointermove)
+   • Рекорды: таблица в localStorage (топ-5) + ввод ника
+   • Мультиплеер: WebSocket-лобби, синхронизация x/speed 60 раз/сек
+   • Тесты: вынести логику (Car/Road/Spawner/Game.update) в game.js и покрыть юнит-тестами
+   ===================================================================== */
+})();
+</script>
 </body>
 </html>
