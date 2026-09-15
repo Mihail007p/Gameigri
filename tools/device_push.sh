@@ -90,6 +90,14 @@ REPO_NAME=$(basename "$REPO_DIR")
 echo "=== [3/5] Пользователь: ${LOGIN:-не определён} · репозиторий: $REPO_NAME ==="
 [ -n "$LOGIN" ] || { echo "Токен не работает."; rm -f "$TOKEN_FILE"; exit 1; }
 
+# Ранняя проверка: есть ли у токена доступ к репозиторию и право на запись.
+# Лучше узнать это сейчас, чем получить «Invalid username or token» на самом пуше.
+REPO_JSON=$(api "https://api.github.com/repos/${LOGIN}/${REPO_NAME}")
+echo "$REPO_JSON" | J full_name | grep -q . \
+  || { echo "  !!! токен не видит репозиторий ${LOGIN}/${REPO_NAME}"; echo "$REPO_JSON" | head -3; rm -f "$TOKEN_FILE"; exit 1; }
+PUSH_OK=$(echo "$REPO_JSON" | python3 -c "import sys,json;print(json.load(sys.stdin).get('permissions',{}).get('push',False))" 2>/dev/null)
+echo "  права на push: ${PUSH_OK}"
+
 # тесты перед публикацией
 if command -v node >/dev/null 2>&1 && [ -f tools/test_game.js ]; then
   if node tools/test_game.js >/tmp/test_game.log 2>&1; then
@@ -110,8 +118,28 @@ git branch -M main
 git remote get-url origin >/dev/null 2>&1 || git remote add origin "https://github.com/${LOGIN}/${REPO_NAME}.git"
 
 echo "=== [4/5] Push ветки main ==="
-git -c credential.helper='!f() { echo username=x-access-token; echo "password=$TOKEN"; }; f' \
-    push -u origin main || { echo "push не удался"; rm -f "$TOKEN_FILE"; exit 1; }
+# ВАЖНО: переменная с токеном обязана быть экспортирована — иначе git запустит credential-helper
+# в дочернем процессе, где переменная пуста, и получит «Invalid username or token».
+export GH_TOKEN="$TOKEN"
+cat > /tmp/gh_askpass.sh <<'ASKPASS'
+#!/bin/sh
+# git спрашивает логин и пароль двумя вызовами: отвечаем токеном через переменную окружения
+case "$1" in
+  *sername*) echo "x-access-token" ;;
+  *)         echo "$GH_TOKEN" ;;
+esac
+ASKPASS
+chmod +x /tmp/gh_askpass.sh
+
+push_with_token() {
+  # -c credential.helper= обнуляет список хелперов, чтобы не мешали сторонние настройки
+  git -c credential.helper= -c core.askpass=/tmp/gh_askpass.sh push -u origin main 2>&1
+}
+if ! push_with_token; then
+  echo "  первая попытка не удалась, повторяю..."
+  sleep 3
+  push_with_token || { echo "push не удался"; rm -f "$TOKEN_FILE" /tmp/gh_askpass.sh; exit 1; }
+fi
 
 if [ "$PAGES" = "1" ]; then
   echo "=== Pages ==="
@@ -122,7 +150,7 @@ if [ "$PAGES" = "1" ]; then
 fi
 
 echo "=== [5/5] Уборка токена ==="
-rm -f "$TOKEN_FILE" && echo "  файл с токеном удалён"
+rm -f "$TOKEN_FILE" /tmp/gh_askpass.sh && echo "  файл с токеном и askpass-скрипт удалены"
 TOKEN=""
 
 echo
