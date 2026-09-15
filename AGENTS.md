@@ -34,8 +34,9 @@
 bash tools/restore.sh                    # поднять проект из GitHub в пустой среде (клонирование + тесты)
 node tools/test_game.js                  # автотесты логики и баланса (без браузера)
 python3 -m http.server 8000              # посмотреть игру локально
-bash tools/gh_push.sh "feat: описание"   # commit + push; тесты прогоняются, при провале пуш отменяется
-bash tools/gh_push.sh --pages            # то же + включить GitHub Pages
+bash tools/device_push.sh "feat: описание"  # РЕКОМЕНДУЕТСЯ: устойчиво к обрывам сети и rate-limit
+bash tools/gh_push.sh "feat: описание"      # вариант через gh CLI; тесты прогоняются, при провале пуш отменяется
+bash tools/device_push.sh --pages           # то же + включить GitHub Pages
 bash tools/deploy_new.sh Name "описание" # создать НОВЫЙ репозиторий из папки
 ```
 
@@ -58,6 +59,18 @@ bash tools/deploy_new.sh Name "описание" # создать НОВЫЙ р�
 **Отладочный хук:** `window.Gameigri = { Game, CFG, Road, Spawner, Car, PlayerCar, TrafficCar, Input }` —
 использовать в тестах и для отладки из консоли браузера.
 
+## 3.1. Памятка по публикации (грабли уже наступили)
+
+- push в GitHub делается через `core.askpass` с **экспортированной** переменной с токеном:
+  credential-helper и askpass запускаются git'ом в дочернем процессе, без `export` они получают
+  пустое значение и GitHub отвечает `Invalid username or token`.
+- Эндпоинт `github.com/login/oauth/access_token` иногда отвечает `slow_down` — это нормально,
+  интервал опроса нужно увеличивать (в `device_push.sh` так и сделано).
+- Разовая сетевая ошибка у `gh auth login` теряет выданный код — поэтому в `device_push.sh`
+  запросы идут с `--retry`.
+- REST-API Pages (`/repos/.../pages`) анонимным запросам отдаёт `404` — это не значит, что Pages
+  выключены; смотреть надо на Actions-воркфлоу «pages build and deployment».
+
 ## 4. Как проверять результат
 
 - Тесты: `node tools/test_game.js` (стенд подменяет DOM и canvas, крутит кадры вручную — браузер не нужен)
@@ -66,7 +79,6 @@ bash tools/deploy_new.sh Name "описание" # создать НОВЫЙ р�
 
 ## 5. Открытые задачи (синхронизировать с PROGRESS.md)
 
-- [ ] Включить GitHub Pages (игра по публичной ссылке)
 - [ ] Звук мотора и удара
 - [ ] Нитро: запас, множитель скорости, индикатор
 - [ ] Бонусы/монеты на дороге
